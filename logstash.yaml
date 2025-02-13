@@ -1,0 +1,279 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: logstash-pv
+spec:
+  capacity:
+    storage: 1Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hostpath
+  hostPath:
+    path: /usr/share/logstash/data/ 
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logstash-pvc
+  namespace: elk 
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: hostpath  
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: elk
+  labels:
+    app: logstash
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+        - name: logstash
+          image: docker.elastic.co/logstash/logstash:7.2.0
+          resources:
+            limits:
+              cpu: 1200m
+              memory: 1Gi
+          ports:
+            - containerPort: 5044
+              name: beats-input
+
+          volumeMounts:
+            - name: logstash-config-reload
+              mountPath: /usr/share/logstash/config/logstash.yml
+              subPath: logstash.yml
+
+            - name: logstash-pipelines
+              mountPath: /usr/share/logstash/config/pipelines.yml
+              subPath: pipelines.yml
+
+            - name: logstash-main-input
+              mountPath: /usr/share/logstash/pipeline/main-input.conf
+              subPath: main-input.conf
+
+            - name: logstash-myapp-pipeline
+              mountPath: /usr/share/logstash/pipeline/myapp-pipeline.conf
+              subPath: myapp-pipeline.conf
+
+            - name: logstash-redis-pipeline
+              mountPath: /usr/share/logstash/pipeline/redis-pipeline.conf
+              subPath: redis-pipeline.conf
+
+            - name: logstash-pattern
+              mountPath: /usr/share/logstash/pattern/mypattern.patterns
+              subPath: mypattern.patterns  
+
+            - name: logstash-data
+              mountPath: /usr/share/logstash/data/
+
+      volumes:
+        - name: logstash-config-reload
+          configMap:
+            name: logstash-configmap
+
+        - name: logstash-pipelines
+          configMap:
+            name: logstash-configmap    
+
+        - name: logstash-main-input
+          configMap:
+            name: logstash-configmap
+                
+        - name: logstash-myapp-pipeline
+          configMap:
+            name: logstash-configmap
+
+        - name: logstash-redis-pipeline
+          configMap:
+            name: logstash-configmap      
+
+        - name: logstash-pattern
+          configMap:
+            name: logstash-configmap
+
+        - name: logstash-data
+          persistentVolumeClaim:
+            claimName: logstash-pvc 
+
+---      
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-configmap
+  namespace: elk
+data:
+  
+  logstash.yml: |
+    config.reload.automatic: true
+    config.reload.interval: 3s
+  
+
+  pipelines.yml: |
+    - pipeline.id: main-input
+      path.config: "/usr/share/logstash/pipeline/main-input.conf"
+
+    - pipeline.id: myapp-pipeline
+      path.config: "/usr/share/logstash/pipeline/myapp-pipeline.conf"
+
+    - pipeline.id: redis-pipeline
+      path.config: "/usr/share/logstash/pipeline/redis-pipeline.conf"
+  
+
+  main-input.conf: |
+    input {
+      beats {
+        port => 5044
+        type => "beats"
+      }
+    }
+
+    output {
+      if [fields][app] == "myapp" {
+        pipeline { send_to => "myapp-pipeline" }
+      } else if [fields][app] == "redis" {
+        pipeline { send_to => "redis-pipeline" }
+      }
+    }
+
+  myapp-pipeline.conf: |
+    input {
+      pipeline {
+        address => "myapp-pipeline"
+      }
+    }
+
+    filter {
+    
+      grok {
+          patterns_dir => ["/usr/share/logstash/pattern/"]
+
+          match => { "message" => "%{TIMESTAMP_ISO8601:message_timestamp}" }
+      }
+
+      date {
+        match => ["message_timestamp", "ISO8601"]
+        target => "event_timestamp"
+      }
+
+      if "_grokparsefailure" in [tags] {
+        mutate {
+          add_field => { "parse_status" => "failed" }
+        }
+      }
+
+      mutate {
+        gsub => [ "message", "\s+", " " ]
+        remove_field => ["agent","ecs","@version","tags","message_timestamp"]
+      }
+    }
+
+    output {
+
+        stdout{}
+
+        if [parse_status] == "failed" {
+          elasticsearch {
+            hosts => ["http://elasticsearch:9200"]
+            index => "log-failed-%{[fields][app]}-%{+yyyyMMdd}"
+          }
+        } else {
+          elasticsearch {
+            hosts => ["http://elasticsearch:9200"]
+            index => "log-x-%{[fields][app]}-%{+yyyyMMdd}"
+          }
+        }
+      
+    }
+
+  redis-pipeline.conf: |
+    input {
+      pipeline {
+        address => "redis-pipeline"
+      }
+    }
+
+    filter {
+      grok {
+          patterns_dir => ["/usr/share/logstash/pattern/"]
+
+          match => { "message" => "%{MESSAGE_TIME:message_timestamp}" }
+      }
+
+      date {
+        match => ["message_timestamp", "ISO8601"]
+        target => "event_timestamp"
+      }
+
+      if "_grokparsefailure" in [tags] {
+        mutate {
+          add_field => { "parse_status" => "failed" }
+        }
+      }
+
+      mutate {
+        gsub => [ "message", "\s+", " " ]
+  
+        remove_field => ["agent","ecs","@version","tags","stream","host","message_timestamp"]
+      }
+    }
+
+    output {
+
+        stdout{}
+
+        if [parse_status] == "failed" {
+          elasticsearch {
+            hosts => ["http://elasticsearch:9200"]
+            index => "log-failed-%{[fields][app]}-%{+yyyyMMdd}"
+          }
+        } else {
+          elasticsearch {
+            hosts => ["http://elasticsearch:9200"]
+            index => "log-x-%{[fields][app]}-%{+yyyyMMdd}"
+          }
+        }
+      
+    }
+
+  mypattern.patterns: |
+    MESSAGE_TIME %{MONTHDAY} %{MONTH} %{YEAR} %{TIME}
+
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: elk
+  labels:
+    app: logstash
+spec:
+  selector:
+    app: logstash
+  ports:
+  - protocol: TCP
+    port: 5044
+    targetPort: 5044
+  type: ClusterIP  
+
+
+

@@ -1,0 +1,202 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: filebeat-pv
+spec:
+  capacity:
+    storage: 1Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hostpath
+  hostPath:
+    path: /usr/share/filebeat/data/registry 
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: filebeat-pvc
+  namespace: elk 
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: hostpath 
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: elk
+  labels:
+    app: filebeat
+spec:
+  selector:
+    matchLabels:
+      app: filebeat
+  template:
+    metadata:
+      labels:
+        app: filebeat
+    spec:
+      securityContext:
+        fsGroup: 0 
+        runAsUser: 0
+      containers:
+        - name: filebeat
+          image: docker.elastic.co/beats/filebeat:7.2.0
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: TZ
+              value: "Asia/Bangkok"
+        
+
+          volumeMounts:
+            - name: filebeat-config
+              mountPath: /usr/share/filebeat/filebeat.yml
+              subPath: filebeat.yml
+
+            - name: varlog-containers
+              mountPath: /var/log/containers
+
+            - name: varlog-pods
+              mountPath: /var/log/pods
+
+            - name: docker-containers
+              mountPath: /var/lib/docker/containers 
+
+            - name: filebeat-registry
+              mountPath: /usr/share/filebeat/data/registry
+            
+      volumes:
+        - name: filebeat-config
+          configMap:
+            name: filebeat
+            
+        - name: varlog-containers
+          hostPath:
+            path: /var/log/containers
+            type: Directory  
+
+        - name: varlog-pods
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+
+        - name: docker-containers
+          hostPath:
+            path: /var/lib/docker/containers
+            type: Directory   
+
+        - name: filebeat-registry
+          persistentVolumeClaim:
+            claimName: filebeat-pvc  
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebeat
+  namespace: elk
+data:
+  filebeat.yml: |
+    logging:
+      level: debug
+      selectors: [registrar]
+
+    filebeat.registry.flush: 10s
+
+    filebeat.autodiscover:
+      providers:
+        - type: kubernetes
+          host: ${NODE_NAME}
+          templates:
+            - condition:
+                contains:
+                  kubernetes.labels.app: "myapp"
+              config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*${data.kubernetes.container.id}.log  
+                  processors:
+                    - add_fields:
+                        target: "fields"
+                        fields:
+                          app: "myapp"
+                    - drop_fields:
+                        fields: ["ecs","stream","agent","log.offset","@version"]
+                    - drop_event:
+                        when:
+                          or:
+                            - regexp:
+                                message: "^\\W"
+                            - regexp:
+                                message: "^\\s*$"
+            - condition:
+                contains:
+                  kubernetes.labels.app_kubernetes_io/instance: "my-redis"
+              config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*${data.kubernetes.container.id}.log        
+                  processors:
+                    - add_fields:
+                        target: "fields"
+                        fields:
+                          app: "redis"
+                    - drop_fields:
+                        fields: ["ecs","log.offset","host","input","kubernetes.labels","kubernetes.uid","kubernetes.statefulset","agent"]
+                    - drop_event:
+                        when:
+                          or:
+                            - regexp:
+                                message: "^\\W"
+                            - regexp:
+                                message: "^\\s*$"
+
+    output.logstash:
+      hosts: ["logstash:5044"]
+
+
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: filebeat-cluster-role 
+rules:
+  - apiGroups: [""]  
+    resources: ["pods", "namespaces", "nodes"] 
+    verbs: ["list", "get","watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: filebeat-cluster-role-binding  
+subjects:
+  - kind: ServiceAccount
+    name: default 
+    namespace: elk
+roleRef:
+  kind: ClusterRole
+  name: filebeat-cluster-role 
+  apiGroup: rbac.authorization.k8s.io
+
+
+
+
+
+
