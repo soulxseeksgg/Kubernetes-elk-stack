@@ -163,13 +163,11 @@ data:
     filter {
     
       grok {
-          patterns_dir => ["/usr/share/logstash/pattern/"]
-
-          match => { "message" => "%{TIMESTAMP_ISO8601:message_timestamp}" }
+          match => { "message" => "%{TIMESTAMP_ISO8601:timestamp} %{DATA:log_level} %{NUMBER:pid} --- \[%{DATA:thread}\] %{DATA:class} : %{GREEDYDATA:messages}" }
       }
 
       date {
-        match => ["message_timestamp", "ISO8601"]
+        match => ["timestamp", "ISO8601"]
         target => "event_timestamp"
       }
 
@@ -180,14 +178,20 @@ data:
       }
 
       mutate {
-        gsub => [ "message", "\s+", " " ]
-        remove_field => ["agent","ecs","@version","tags","message_timestamp"]
+        gsub => [ 
+          "messages", "^\s+|\s+$", ""
+          ,"log_level", "^\s+|\s+$", ""
+          ,"class", "^\s+|\s+$", ""
+        ]
+        
+        remove_field => ["agent","ecs","@version","tags","timestamp","pid","message"]
       }
+
     }
 
     output {
 
-        stdout{}
+        stdout { codec => rubydebug }
 
         if [parse_status] == "failed" {
           elasticsearch {
@@ -197,7 +201,7 @@ data:
         } else {
           elasticsearch {
             hosts => ["http://elasticsearch:9200"]
-            index => "log-x-%{[fields][app]}-%{+yyyyMMdd}"
+            index => "log-%{[fields][app]}-%{+yyyyMMdd}"
           }
         }
       
@@ -214,11 +218,11 @@ data:
       grok {
           patterns_dir => ["/usr/share/logstash/pattern/"]
 
-          match => { "message" => "%{MESSAGE_TIME:message_timestamp}" }
+          match => { "message" => "%{REDIS_MESSAGE_TIME:timestamp} %{REDIS_LOG_SYMBOL:log_symbol} %{GREEDYDATA:messages}" }
       }
 
       date {
-        match => ["message_timestamp", "ISO8601"]
+        match => ["timestamp", "ISO8601"]
         target => "event_timestamp"
       }
 
@@ -229,10 +233,25 @@ data:
       }
 
       mutate {
-        gsub => [ "message", "\s+", " " ]
+        gsub => [ 
+          "messages", "^\s+|\s+$", ""
+          ,"log_symbol", "\s+", "" 
+        ]
   
-        remove_field => ["agent","ecs","@version","tags","stream","host","message_timestamp"]
+        remove_field => ["agent","ecs","@version","tags","stream","host","timestamp","message"]
       }
+
+      translate {
+        field => "log_symbol"
+        destination => "log_level"
+        dictionary => {
+          "#" => "WARNING"
+          "*" => "INFO"
+          "-" => "DEBUG"
+          "+" => "TRACE"
+        }
+      }
+
     }
 
     output {
@@ -247,16 +266,15 @@ data:
         } else {
           elasticsearch {
             hosts => ["http://elasticsearch:9200"]
-            index => "log-x-%{[fields][app]}-%{+yyyyMMdd}"
+            index => "log-%{[fields][app]}-%{+yyyyMMdd}"
           }
         }
       
     }
 
   mypattern.patterns: |
-    MESSAGE_TIME %{MONTHDAY} %{MONTH} %{YEAR} %{TIME}
-
-
+    REDIS_MESSAGE_TIME %{MONTHDAY} %{MONTH} %{YEAR} %{TIME}
+    REDIS_LOG_SYMBOL [\#\*\-\+]
 
 ---
 apiVersion: v1
