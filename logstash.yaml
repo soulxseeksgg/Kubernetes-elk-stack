@@ -1,33 +1,4 @@
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: logstash-pv
-spec:
-  capacity:
-    storage: 1Gi
-  volumeMode: Filesystem
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: hostpath
-  hostPath:
-    path: /usr/share/logstash/data/ 
-
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: logstash-pvc
-  namespace: elk 
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
-  storageClassName: hostpath  
-
----
+# deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -113,7 +84,39 @@ spec:
           persistentVolumeClaim:
             claimName: logstash-pvc 
 
----      
+---   
+#PV & PVC
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: logstash-pv
+spec:
+  capacity:
+    storage: 1Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hostpath
+  hostPath:
+    path: /usr/share/logstash/data/ 
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logstash-pvc
+  namespace: elk 
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: hostpath  
+
+---
+#config map   
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -146,9 +149,9 @@ data:
     }
 
     output {
-      if [fields][app] == "myapp" {
+      if [appname][app] == "myapp" {
         pipeline { send_to => "myapp-pipeline" }
-      } else if [fields][app] == "redis" {
+      } else if [appname][app] == "redis" {
         pipeline { send_to => "redis-pipeline" }
       }
     }
@@ -196,12 +199,12 @@ data:
         if [parse_status] == "failed" {
           elasticsearch {
             hosts => ["http://elasticsearch:9200"]
-            index => "log-failed-%{[fields][app]}-%{+yyyyMMdd}"
+            index => "log-failed-%{[appname][app]}-%{+yyyyMMdd}"
           }
         } else {
           elasticsearch {
             hosts => ["http://elasticsearch:9200"]
-            index => "log-%{[fields][app]}-%{+yyyyMMdd}"
+            index => "log-%{[appname][app]}-%{+yyyyMMdd}"
           }
         }
       
@@ -261,12 +264,12 @@ data:
         if [parse_status] == "failed" {
           elasticsearch {
             hosts => ["http://elasticsearch:9200"]
-            index => "log-failed-%{[fields][app]}-%{+yyyyMMdd}"
+            index => "log-failed-%{[appname][app]}-%{+yyyyMMdd}"
           }
         } else {
           elasticsearch {
             hosts => ["http://elasticsearch:9200"]
-            index => "log-%{[fields][app]}-%{+yyyyMMdd}"
+            index => "log-%{[appname][app]}-%{+yyyyMMdd}"
           }
         }
       
@@ -277,6 +280,7 @@ data:
     REDIS_LOG_SYMBOL [\#\*\-\+]
 
 ---
+#service
 apiVersion: v1
 kind: Service
 metadata:
